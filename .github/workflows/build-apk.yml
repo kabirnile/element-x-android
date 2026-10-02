@@ -1,0 +1,70 @@
+name: Build Deducia Chat APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Fork Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Replace App Logo and Branding Icons
+        run: |
+          if [ -f "logo.png" ]; then
+            echo "Overriding default app icons with logo.png..."
+            mkdir -p elementx/src/main/res/mipmap-hdpi
+            mkdir -p elementx/src/main/res/mipmap-mdpi
+            mkdir -p elementx/src/main/res/mipmap-xhdpi
+            mkdir -p elementx/src/main/res/mipmap-xxhdpi
+            mkdir -p elementx/src/main/res/mipmap-xxxhdpi
+
+            cp logo.png elementx/src/main/res/mipmap-hdpi/ic_launcher.png
+            cp logo.png elementx/src/main/res/mipmap-mdpi/ic_launcher.png
+            cp logo.png elementx/src/main/res/mipmap-xhdpi/ic_launcher.png
+            cp logo.png elementx/src/main/res/mipmap-xxhdpi/ic_launcher.png
+            cp logo.png elementx/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+
+            cp logo.png elementx/src/main/res/mipmap-hdpi/ic_launcher_round.png
+            cp logo.png elementx/src/main/res/mipmap-mdpi/ic_launcher_round.png
+            cp logo.png elementx/src/main/res/mipmap-xhdpi/ic_launcher_round.png
+            cp logo.png elementx/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+            cp logo.png elementx/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+          else
+            echo "logo.png not found in root directory, skipping icon replacement."
+          fi
+
+      - name: Hardcode Backend & Override Share Links
+        run: |
+          echo "Updating App Strings to Deducia Chat..."
+          sed -i 's/<string name="app_name">.*/<string name="app_name">Deducia Chat<\/string>/g' elementx/src/main/res/values/strings.xml || true
+          
+          echo "Hardcoding Server URL to https://chat.deducia.com..."
+          find . -type f \( -name "*.kt" -o -name "*.xml" -o -name "*.json" \) -exec sed -i 's|https://matrix.org|https://chat.deducia.com|g' {} +
+          
+          echo "Replacing matrix.to share links with social.deducia.com..."
+          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" \) -exec sed -i 's|https://matrix.to|https://social.deducia.com|g' {} +
+
+      - name: Grant Execute Permission for Gradle
+        run: chmod +x gradlew
+
+      - name: Build Unsigned Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Upload Deducia Chat APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeduciaChat-Release-APK
+          path: app/build/outputs/apk/release/*.apk
+          
