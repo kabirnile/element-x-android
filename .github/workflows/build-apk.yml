@@ -1,71 +1,165 @@
-name: Build Deducia Chat APK
+name: Build Chatix Debug APK
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
+  push:
+    branches: [develop, main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Element X recent releases may require JDK 21. If Gradle complains about
+  # toolchain / class file version, change this to '21'.
+  JAVA_VERSION: '17'
 
 jobs:
   build:
+    name: Build Chatix (debug)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout Fork Repository (With Submodules)
+      - name: Checkout (no submodules)
         uses: actions/checkout@v4
-        with:
-          submodules: 'true'
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v3
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: 'gradle'
-
-      - name: Replace App Logo and Branding Icons
+      - name: Initialize accessible submodules, de-register inaccessible ones
         run: |
-          if [ -f "logo.png" ]; then
-            echo "Overriding default app icons with logo.png..."
-            mkdir -p app/src/main/res/mipmap-hdpi
-            mkdir -p app/src/main/res/mipmap-mdpi
-            mkdir -p app/src/main/res/mipmap-xhdpi
-            mkdir -p app/src/main/res/mipmap-xxhdpi
-            mkdir -p app/src/main/res/mipmap-xxxhdpi
-
-            cp logo.png app/src/main/res/mipmap-hdpi/ic_launcher.png
-            cp logo.png app/src/main/res/mipmap-mdpi/ic_launcher.png
-            cp logo.png app/src/main/res/mipmap-xhdpi/ic_launcher.png
-            cp logo.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-            cp logo.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-
-            cp logo.png app/src/main/res/mipmap-hdpi/ic_launcher_round.png
-            cp logo.png app/src/main/res/mipmap-mdpi/ic_launcher_round.png
-            cp logo.png app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
-            cp logo.png app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
-            cp logo.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
-          else
-            echo "logo.png not found in root directory, skipping icon replacement."
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+          # Use HTTPS instead of SSH so public submodules work without SSH keys
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          if [ ! -f .gitmodules ]; then
+            echo "No .gitmodules found, nothing to do."
+            exit 0
           fi
+          git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | while read -r key path; do
+            name="${key#submodule.}"
+            name="${name%.path}"
+            echo "::group::Submodule '${name}' (${path})"
+            if timeout 180 git submodule update --init --depth 1 -- "${path}"; then
+              echo "Initialized '${name}'."
+            else
+              echo "::warning::Submodule '${name}' is not accessible. De-registering it."
+              git submodule deinit -f -- "${path}" 2>/dev/null || true
+              rm -rf ".git/modules/${name}" || true
+              git config --local --remove-section "submodule.${name}" 2>/dev/null || true
+              rm -rf "${path}" || true
+              mkdir -p "${path}"
+            fi
+            echo "::endgroup::"
+          done
+          git submodule status || true
 
-      - name: Hardcode Backend & Override Share Links (Option 1)
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Accept Android SDK licenses
         run: |
-          echo "Updating App Strings to Deducia Chat..."
-          sed -i 's/<string name="app_name">.*/<string name="app_name">Deducia Chat<\/string>/g' app/src/main/res/values/strings.xml || true
-          
-          echo "Hardcoding Server URL to https://chat.deducia.com..."
-          find . -type f \( -name "*.kt" -o -name "*.xml" -o -name "*.json" \) -exec sed -i 's|https://matrix.org|https://chat.deducia.com|g' {} + || true
-          
-          echo "Replacing matrix.to share links with chat.deducia.com..."
-          find . -type f \( -name "*.kt" -o -name "*.java" -o -name "*.xml" \) -exec sed -i 's|https://matrix.to|https://chat.deducia.com|g' {} + || true
+          yes | "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
-      - name: Grant Execute Permission for Gradle
-        run: chmod +x gradlew
+      - name: Rebrand app name to Chatix
+        run: |
+          # 1) String resources in every module (strings.xml + Element X's localazy.xml)
+          find . \( -name .git -o -name build -o -name .gradle -o -name node_modules -o -name .github \) -type d -prune -o \
+            -type f \( -name 'strings.xml' -o -name 'localazy.xml' \) \
+            -exec sed -i -E 's/\bElement X\b/Chatix/g; s/\bElement\b/Chatix/g' {} + || true
+          # 2) Build-time app name (BuildTimeConfig / resValue app_name in Gradle scripts)
+          find . \( -name .git -o -name build -o -name .gradle -o -name node_modules -o -name .github \) -type d -prune -o \
+            -type f \( -name 'BuildTimeConfig.kt' -o -name 'build.gradle.kts' -o -name 'build.gradle' \) \
+            -exec sed -i -E 's/"Element X\b/"Chatix/g; s/"Element\b/"Chatix/g' {} + || true
 
-      - name: Build Debug APK (Bypasses Keystore Errors)
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Replace launcher icons with logo.png
+        run: |
+          if [ ! -f logo.png ]; then
+            echo "::error::logo.png was not found in the repository root."
+            exit 1
+          fi
+          declare -A DENSITIES=( [mdpi]=48 [hdpi]=72 [xhdpi]=96 [xxhdpi]=144 [xxxhdpi]=192 )
 
-      - name: Upload Deducia Chat APK Artifact
+          # Always patch app/src/main/res, plus any other source set (debug, nightly, ...)
+          # that already ships its own launcher icons and would otherwise override ours.
+          TARGETS="$(
+            {
+              echo "app/src/main/res"
+              find app/src -path '*/res/mipmap-*/ic_launcher*' -not -path '*/build/*' 2>/dev/null \
+                | sed -E 's#/mipmap-[^/]*/[^/]*$##' || true
+            } | sort -u
+          )"
+          while IFS= read -r RES; do
+            if [ -z "${RES}" ]; then
+              continue
+            fi
+            echo "Updating launcher icons in ${RES}"
+            for density in "${!DENSITIES[@]}"; do
+              size="${DENSITIES[$density]}"
+              dir="${RES}/mipmap-${density}"
+              mkdir -p "${dir}"
+              for icon in ic_launcher ic_launcher_round; do
+                if ! { command -v convert > /dev/null 2>&1 && convert logo.png -resize "${size}x${size}" "${dir}/${icon}.png"; }; then
+                  cp -f logo.png "${dir}/${icon}.png"
+                fi
+              done
+            done
+            # Adaptive-icon XMLs (mipmap-anydpi*) take precedence over PNGs on modern Android,
+            # and same-named .webp files would clash with the new PNGs. Remove both.
+            find "${RES}" -path '*/mipmap-anydpi*' \( -name 'ic_launcher.xml' -o -name 'ic_launcher_round.xml' \) -delete || true
+            find "${RES}" -path '*/mipmap-*' \( -name 'ic_launcher.webp' -o -name 'ic_launcher_round.webp' \) -delete || true
+          done <<< "${TARGETS}"
+
+      - name: Hardcode homeserver URL (chat.deducia.com)
+        run: |
+          # Full URL replacement across source, resources and build scripts
+          find . \( -name .git -o -name build -o -name .gradle -o -name node_modules -o -name .github \) -type d -prune -o \
+            -type f \( -name '*.kt' -o -name '*.java' -o -name '*.xml' -o -name '*.json' -o -name '*.gradle' -o -name '*.kts' \) \
+            -exec sed -i 's#https://matrix\.org#https://chat.deducia.com#g' {} + || true
+          # Scheme-less default server constants, e.g. DEFAULT_HOMESERVER_URL = "matrix.org"
+          find . \( -name .git -o -name build -o -name .gradle -o -name node_modules -o -name .github \) -type d -prune -o \
+            -type f -name '*.kt' \
+            -exec sed -i 's#"matrix\.org"#"chat.deducia.com"#g' {} + || true
+
+      - name: Replace matrix.to share links
+        run: |
+          grep -rIlZ -F 'https://matrix.to' \
+            --exclude-dir=.git --exclude-dir=build --exclude-dir=.gradle \
+            --exclude-dir=.github --exclude-dir=node_modules . \
+            | xargs -0 -r sed -i 's#https://matrix\.to#https://chat.deducia.com#g' || true
+
+      - name: Show applied overrides (diagnostics)
+        run: |
+          echo "--- chat.deducia.com occurrences (first 20) ---"
+          grep -rIn --include='*.kt' --include='*.kts' 'chat\.deducia\.com' \
+            --exclude-dir=.git --exclude-dir=build . | head -n 20 || true
+          echo "--- Remaining 'Element X' in values/strings.xml files (first 10) ---"
+          grep -rIn --include='strings.xml' 'Element X' --exclude-dir=build . | head -n 10 || true
+
+      - name: Build debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: List generated APKs
+        run: |
+          find app/build/outputs -name '*.apk' -print || true
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DeduciaChat-Debug-APK
-          path: app/build/outputs/apk/debug/*.apk
+          name: Chatix-Debug-APK
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/*/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
